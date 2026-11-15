@@ -111,9 +111,15 @@ async def baixar_com_nome(msg, idx):
         print(f"Erro baixar {msg.id}: {e}")
         return None
 
-async def enviar_album(grouped_id):
-    await asyncio.sleep(3.0)
-    eventos = albuns_pendentes.pop(grouped_id, [])
+# v8: junta tudo que chegar dentro de 6s como UM álbum só (corrige álbum grande dividido em 2 levas)
+album_buffer = []
+album_task = None
+async def enviar_album(grouped_id=None):
+    global album_task
+    await asyncio.sleep(6.0)
+    eventos = list(album_buffer)
+    album_buffer.clear()
+    album_task = None
     if not eventos:
         return
     eventos = sorted(eventos, key=lambda e: e.message.id)
@@ -180,13 +186,20 @@ async def copiar_nova(event):
         return
     msg = event.message
     grouped_id = getattr(msg, 'grouped_id', None)
-    if grouped_id:
-        if grouped_id not in albuns_pendentes:
-            albuns_pendentes[grouped_id] = []
-            asyncio.create_task(enviar_album(grouped_id))
-        albuns_pendentes[grouped_id].append(event)
-    else:
-        await enviar_unico(event)
+    # Se tem mídia, junta no buffer de 6s - assim álbum grande que vem em 2 levas vira 1 só
+    if getattr(msg, 'media', None) and (grouped_id or True):
+        # Se for álbum OU foto única com mídia, espera 6s para ver se vem mais fotos junto
+        # Só envia na hora se for texto puro sem mídia
+        global album_task
+        album_buffer.append(event)
+        if album_task is not None:
+            try:
+                album_task.cancel()
+            except:
+                pass
+        album_task = asyncio.create_task(enviar_album())
+        return
+    await enviar_unico(event)
 
 @client.on(events.MessageEdited(chats=ORIGEM))
 async def copiar_edicao(event):
@@ -222,7 +235,7 @@ async def copiar_exclusao(event):
         except Exception as e:
             print(f"❌ Erro apagar {id_destino}: {e}")
 
-print("🚀 Sistema Live21 v7.0 - SEM ASSINATURA ligado!")
+print("🚀 Sistema Live21 v8.0 - ALBUM JUNTO 6s ligado!")
 print("👀 Ouvindo: @teamlive21 (SÓ ADMINS)")
 print("📤 Enviando para: @Live21streaming")
 print("✏️ Monitorando EDIÇÕES")
