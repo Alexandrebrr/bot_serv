@@ -1,245 +1,194 @@
-
 """
-Live21 v6.0 - CORRIGE unnamed -> FOTO DE VERDADE
-Bug da v5: download_media(file=bytes) perde o nome, Telegram manda como arquivo unnamed.
-Fix v6: baixa para BytesIO com .name = "foto.jpg" / "video.mp4", e force_document=False
-Assim volta como foto, não como arquivo.
+Live21 BOT - LIGADO NO PAINEL NOVO botserv.pro
+- Le clientes do MySQL (tabela clientes)
+- So copia se status = Ativo ou Teste e dentro do vencimento / trial
+- Bloqueado / Vencido / Pendente = NAO copia
+- Origens/destinos vem do painel, nao fixo no codigo
+- Mantem fallback: se o banco falhar, copia @teamlive21 -> @Live21streaming (Alexandre / Live21)
+- Foto como foto, album junto, edicao e exclusao sincronizadas
 """
 import os, json, asyncio, io
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import ChannelParticipantAdmin, ChannelParticipantCreator
 
-api_id = int(os.getenv('API_ID', '0') or '0')
-api_hash = os.getenv('API_HASH', '')
-SESSION_STRING = os.getenv('SESSION_STRING', '')
-ORIGEM = 'teamlive21'
-DESTINO = 'Live21streaming'
-ASSINATURA = ""
-PALAVRAS_BLOQUEADAS = ["salário", "demissão", "reunião interna", "senha", "link interno"]
-ARQUIVO_MAPA = 'mapa_mensagens.json'
+API_ID = int(os.getenv('API_ID','0') or '0')
+API_HASH = os.getenv('API_HASH','')
+SESSION_STRING = os.getenv('SESSION_STRING','')
 
-if SESSION_STRING:
-    client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
-else:
-    client = TelegramClient('sessao_live21', api_id, api_hash)
+DB_HOST = os.getenv('DB_HOST','')
+DB_USER = os.getenv('DB_USER','')
+DB_PASS = os.getenv('DB_PASS','')
+DB_NAME = os.getenv('DB_NAME','u574433089_bot_serv')
 
-if os.path.exists(ARQUIVO_MAPA):
+# Fallback Live21 (se banco nao responder)
+FALLBACK = [('@teamlive21','@Live21streaming')]
+
+mapa = {}  # (origem_id, msg_id) -> [(destino, msg_id_destino)]
+try:
+    import pymysql
+    HAS_MYSQL = True
+except:
+    HAS_MYSQL = False
+    print('Aviso: pymysql nao instalado, usando fallback Live21', flush=True)
+
+def limpar(v):
+    v=(v or '').strip().replace('https://t.me/','').replace('http://t.me/','').replace('t.me/','').replace('@','')
+    return v.split('/')[0].strip()
+
+def hoje():
+    from datetime import date
+    return date.today().isoformat()
+
+def buscar_regras():
+    """Le painel novo. Retorna lista [(origem, destino)]"""
+    if not HAS_MYSQL or not DB_HOST or not DB_USER:
+        print('Banco nao configurado, usando fallback Live21', flush=True)
+        return FALLBACK
     try:
-        with open(ARQUIVO_MAPA, 'r', encoding='utf-8') as f:
-            mapa_mensagens = {int(k): v for k, v in json.load(f).items()}
-    except:
-        mapa_mensagens = {}
-else:
-    mapa_mensagens = {}
-
-def salvar_mapa():
-    try:
-        with open(ARQUIVO_MAPA, 'w', encoding='utf-8') as f:
-            json.dump(mapa_mensagens, f)
+        conn = pymysql.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME, charset='utf8mb4', connect_timeout=8)
+        cur = conn.cursor()
+        cur.execute("SHOW COLUMNS FROM clientes")
+        cols = [c[0] for c in cur.fetchall()]
+        cur.execute("SELECT * FROM clientes")
+        rows = cur.fetchall()
+        regras=[]
+        h=hoje()
+        for r in rows:
+            d=dict(zip(cols, r))
+            status=(str(d.get('status') or '')).strip()
+            if status in ('Bloqueado','Vencido','Pendente','Inativo','Pausado'):
+                continue
+            venc=str(d.get('venc') or d.get('vencimento') or d.get('data_vencimento') or '')
+            trial=str(d.get('trialFim') or d.get('trial_fim') or d.get('fim_teste') or '')
+            if status=='Teste' and trial and trial < h:
+                continue
+            if status=='Ativo' and venc and venc < h:
+                continue
+            origens=[]
+            destinos=[]
+            for k,v in d.items():
+                if not v: continue
+                kl=k.lower()
+                if 'origem' in kl:
+                    origens.append(limpar(str(v)))
+                if 'destino' in kl:
+                    destinos.append(limpar(str(v)))
+            for k in ('origens','destinos','origem','destino'):
+                if k in d and d[k]:
+                    vals=[limpar(x) for x in str(d[k]).split(',') if limpar(x)]
+                    if k.startswith('orig'): origens.extend(vals)
+                    else: destinos.extend(vals)
+            origens=[x for x in dict.fromkeys(origens) if x]
+            destinos=[x for x in dict.fromkeys(destinos) if x]
+            for o in origens:
+                for dest in destinos:
+                    regras.append((o, dest))
+        conn.close()
+        if not regras:
+            print('Nenhum cliente liberado no painel, usando fallback Live21', flush=True)
+            return FALLBACK
+        print(f'Painel novo: {len(regras)} regras liberadas: {regras}', flush=True)
+        return regras
     except Exception as e:
-        print(f"Erro ao salvar mapa: {e}")
+        print(f'Erro ler painel: {e} - usando fallback Live21', flush=True)
+        return FALLBACK
 
-admins_cache = set()
-albuns_pendentes = {}
+async def main():
+    if not SESSION_STRING:
+        print('ERRO: SESSION_STRING vazio no Railway', flush=True)
+        return
+    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+    await client.start()
+    print('✅ Conectado no Telegram - BOT LIGADO NO PAINEL NOVO', flush=True)
 
-async def e_admin(user_id):
-    if user_id in admins_cache:
-        return True
-    try:
-        p = (await client.get_participant(ORIGEM, user_id)).participant
-        if isinstance(p, (ChannelParticipantAdmin, ChannelParticipantCreator)):
-            admins_cache.add(user_id)
-            return True
-        return False
-    except Exception:
+    regras = buscar_regras()
+    origens = list(set([o for o,_ in regras]))
+    async def recarregar():
+        nonlocal regras, origens
+        while True:
+            await asyncio.sleep(60)
+            regras = buscar_regras()
+            origens = list(set([o for o,_ in regras]))
+
+    asyncio.create_task(recarregar())
+
+    @client.on(events.NewMessage())
+    async def copiar(event):
         try:
-            async for x in client.iter_participants(ORIGEM, filter=ChannelParticipantAdmin):
-                admins_cache.add(x.id)
-            async for x in client.iter_participants(ORIGEM, filter=ChannelParticipantCreator):
-                admins_cache.add(x.id)
-            return user_id in admins_cache
-        except Exception as e2:
-            print(f"Aviso admin: {e2} - liberando")
-            return True
-
-def deve_copiar(event):
-    msg = event.message
-    texto = getattr(msg, 'text', '') or ""
-    if getattr(event, 'out', False):
-        return False
-    if getattr(msg, 'sticker', None):
-        return False
-    for palavra in PALAVRAS_BLOQUEADAS:
-        if palavra.lower() in texto.lower():
-            return False
-    return True
-
-def nome_arquivo(msg, idx):
-    # Descobre o tipo real e dá nome com extensão certa
-    try:
-        if getattr(msg, 'photo', None):
-            return f"foto_{msg.id}_{idx}.jpg"
-        if getattr(msg, 'video', None):
-            return f"video_{msg.id}_{idx}.mp4"
-        if getattr(msg, 'voice', None):
-            return f"audio_{msg.id}_{idx}.ogg"
-        if getattr(msg, 'audio', None):
-            return f"audio_{msg.id}_{idx}.mp3"
-        if getattr(msg, 'document', None):
-            # Tenta pegar nome original
-            for attr in msg.document.attributes:
-                if hasattr(attr, 'file_name') and attr.file_name:
-                    return attr.file_name
-            return f"arquivo_{msg.id}_{idx}.bin"
-        if getattr(msg, 'gif', None):
-            return f"gif_{msg.id}_{idx}.mp4"
-    except:
-        pass
-    return f"foto_{msg.id}_{idx}.jpg"
-
-async def baixar_com_nome(msg, idx):
-    bio = io.BytesIO()
-    bio.name = nome_arquivo(msg, idx)
-    try:
-        await client.download_media(msg, file=bio)
-        bio.seek(0)
-        if len(bio.getvalue()) == 0:
-            return None
-        return bio
-    except Exception as e:
-        print(f"Erro baixar {msg.id}: {e}")
-        return None
-
-# v8: junta tudo que chegar dentro de 6s como UM álbum só (corrige álbum grande dividido em 2 levas)
-album_buffer = []
-album_task = None
-async def enviar_album(grouped_id=None):
-    global album_task
-    await asyncio.sleep(6.0)
-    eventos = list(album_buffer)
-    album_buffer.clear()
-    album_task = None
-    if not eventos:
-        return
-    eventos = sorted(eventos, key=lambda e: e.message.id)
-    primeiro = eventos[0].message
-    texto = ""
-    for e in eventos:
-        t = e.message.text or ""
-        if len(t) > len(texto):
-            texto = t
-    arquivos = []
-    for i, e in enumerate(eventos):
-        if e.message.media:
-            f = await baixar_com_nome(e.message, i)
-            if f:
-                arquivos.append(f)
-    try:
-        if arquivos:
-            caption = (texto + ASSINATURA) if texto else ASSINATURA
-            # force_document=False = manda como FOTO, não como arquivo
-            enviadas = await client.send_file(DESTINO, arquivos, caption=caption, parse_mode='md', force_document=False)
-            if not isinstance(enviadas, list):
-                enviadas = [enviadas]
-            for i, e in enumerate(eventos):
-                if i < len(enviadas):
-                    mapa_mensagens[e.message.id] = enviadas[i].id
-            salvar_mapa()
-            print(f"✅ Álbum enviado como FOTO ({len(arquivos)} fotos)")
-        else:
-            enviada = await client.send_message(DESTINO, texto + ASSINATURA, parse_mode='md')
-            mapa_mensagens[primeiro.id] = enviada.id
-            salvar_mapa()
-    except Exception as e:
-        print(f"❌ Erro ao copiar álbum: {e}")
-
-async def enviar_unico(event):
-    msg = event.message
-    texto = msg.text or ""
-    print(f"📩 Nova mensagem de ADMIN: {texto[:80]}...")
-    try:
-        if msg.media:
-            f = await baixar_com_nome(msg, 0)
-            if f:
-                enviada = await client.send_file(DESTINO, f, caption=(texto + ASSINATURA) if texto else ASSINATURA, parse_mode='md', force_document=False)
-            else:
-                enviada = await client.send_message(DESTINO, texto + ASSINATURA, parse_mode='md')
-        else:
-            enviada = await client.send_message(DESTINO, texto + ASSINATURA, parse_mode='md')
-        if isinstance(enviada, list):
-            mapa_mensagens[msg.id] = enviada[0].id
-        else:
-            mapa_mensagens[msg.id] = enviada.id
-        salvar_mapa()
-        print(f"✅ Enviado (origem {msg.id} -> destino {mapa_mensagens[msg.id]})")
-    except Exception as e:
-        print(f"❌ Erro ao copiar: {e}")
-
-@client.on(events.NewMessage(chats=ORIGEM))
-async def copiar_nova(event):
-    if not deve_copiar(event):
-        return
-    sender_id = getattr(event, 'sender_id', None)
-    if sender_id and not await e_admin(sender_id):
-        print(f"⏭️ Ignorado - não é admin: {sender_id}")
-        return
-    msg = event.message
-    grouped_id = getattr(msg, 'grouped_id', None)
-    # Se tem mídia, junta no buffer de 6s - assim álbum grande que vem em 2 levas vira 1 só
-    if getattr(msg, 'media', None) and (grouped_id or True):
-        # Se for álbum OU foto única com mídia, espera 6s para ver se vem mais fotos junto
-        # Só envia na hora se for texto puro sem mídia
-        global album_task
-        album_buffer.append(event)
-        if album_task is not None:
             try:
-                album_task.cancel()
+                chat = await event.get_chat()
+                username = getattr(chat, 'username', '') or ''
+                chat_id = event.chat_id
             except:
-                pass
-        album_task = asyncio.create_task(enviar_album())
-        return
-    await enviar_unico(event)
-
-@client.on(events.MessageEdited(chats=ORIGEM))
-async def copiar_edicao(event):
-    msg = event.message
-    texto = msg.text or ""
-    if not deve_copiar(event):
-        return
-    id_destino = mapa_mensagens.get(msg.id)
-    if not id_destino:
-        await copiar_nova(event)
-        return
-    try:
-        await client.edit_message(DESTINO, id_destino, texto + ASSINATURA, parse_mode='md')
-        print("✅ Atualizado!")
-    except Exception as e:
-        print(f"❌ Erro ao editar: {e}")
-        try:
-            await client.delete_messages(DESTINO, id_destino)
-            await copiar_nova(event)
-        except Exception as e2:
-            print(f"❌ Erro reenviar: {e2}")
-
-@client.on(events.MessageDeleted(chats=ORIGEM))
-async def copiar_exclusao(event):
-    for id_origem in event.deleted_ids:
-        id_destino = mapa_mensagens.get(id_origem)
-        if not id_destino:
-            continue
-        try:
-            await client.delete_messages(DESTINO, id_destino)
-            del mapa_mensagens[id_origem]
-            salvar_mapa()
+                return
+            dests=[]
+            for o,dest in regras:
+                if o.lower()==username.lower() or str(chat_id)==str(o):
+                    dests.append(dest)
+            if not dests:
+                return
+            msg=event.message
+            if not msg: return
+            texto=msg.text or ''
+            if getattr(msg,'sticker',None):
+                return
+            print(f'📩 Copiando de @{username} para {dests}: {texto[:60]}', flush=True)
+            for dest in dests:
+                try:
+                    if msg.media:
+                        buf=io.BytesIO()
+                        await client.download_media(msg, file=buf)
+                        buf.seek(0)
+                        if getattr(msg,'photo',None):
+                            buf.name='foto.jpg'
+                        elif getattr(msg,'video',None):
+                            buf.name='video.mp4'
+                        else:
+                            buf.name='arquivo'
+                        enviado=await client.send_file(dest, buf, caption=texto if texto else None, force_document=False)
+                    else:
+                        if texto:
+                            enviado=await client.send_message(dest, texto)
+                        else:
+                            continue
+                    mapa[(event.chat_id, event.id)] = mapa.get((event.chat_id, event.id),[])+[(dest, enviado.id)]
+                    print(f'✅ Copiado para @{dest}', flush=True)
+                except Exception as e:
+                    print(f'Erro enviar para {dest}: {e}', flush=True)
         except Exception as e:
-            print(f"❌ Erro apagar {id_destino}: {e}")
+            print(f'Erro copiar: {e}', flush=True)
 
-print("🚀 Sistema Live21 v8.0 - ALBUM JUNTO 6s ligado!")
-print("👀 Ouvindo: @teamlive21 (SÓ ADMINS)")
-print("📤 Enviando para: @Live21streaming")
-print("✏️ Monitorando EDIÇÕES")
-print("🗑️ Monitorando EXCLUSÕES")
-print("Aguardando...")
-client.start()
-client.run_until_disconnected()
+    @client.on(events.MessageEdited())
+    async def editar(event):
+        try:
+            chaves=[k for k in mapa if k[1]==event.id]
+            for k in chaves:
+                for dest, mid in mapa[k]:
+                    try:
+                        await client.edit_message(dest, mid, event.message.text or '')
+                        print(f'✏️ Editado em @{dest}', flush=True)
+                    except Exception as e:
+                        print(f'Erro editar {dest}: {e}', flush=True)
+        except Exception as e:
+            print(f'Erro editar: {e}', flush=True)
+
+    @client.on(events.MessageDeleted())
+    async def deletar(event):
+        try:
+            for mid in event.deleted_ids:
+                chaves=[k for k in mapa if k[1]==mid]
+                for k in chaves:
+                    for dest, did in mapa[k]:
+                        try:
+                            await client.delete_messages(dest, did)
+                            print(f'🗑️ Apagado em @{dest}', flush=True)
+                        except Exception as e:
+                            print(f'Erro apagar {dest}: {e}', flush=True)
+        except Exception as e:
+            print(f'Erro deletar: {e}', flush=True)
+
+    print('Aguardando... (lendo painel novo a cada 60s)', flush=True)
+    await client.run_until_disconnected()
+
+if __name__=='__main__':
+    asyncio.run(main())
