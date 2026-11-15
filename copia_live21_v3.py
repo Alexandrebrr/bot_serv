@@ -15,7 +15,7 @@ api_hash = os.getenv('API_HASH', '')
 SESSION_STRING = os.getenv('SESSION_STRING', '')
 ORIGEM = 'teamlive21'
 DESTINO = 'Live21streaming'
-ASSINATURA = "\n\n📢 _Informação oficial repassada para revendedores_"
+ASSINATURA = ""
 PALAVRAS_BLOQUEADAS = ["salário", "demissão", "reunião interna", "senha", "link interno"]
 ARQUIVO_MAPA = 'mapa_mensagens.json'
 
@@ -199,7 +199,7 @@ async def copiar_edicao(event):
         await copiar_nova(event)
         return
     try:
-        await client.edit_message(DESTINO, id_destino, texto + ASSINATURA + "\n\n✏️ _Atualizado_", parse_mode='md')
+        await client.edit_message(DESTINO, id_destino, texto + ASSINATURA, parse_mode='md')
         print("✅ Atualizado!")
     except Exception as e:
         print(f"❌ Erro ao editar: {e}")
@@ -222,7 +222,7 @@ async def copiar_exclusao(event):
         except Exception as e:
             print(f"❌ Erro apagar {id_destino}: {e}")
 
-print("🚀 Sistema Live21 v6.0 - FOTO DE VERDADE ligado!")
+print("🚀 Sistema Live21 v7.0 - SEM ASSINATURA ligado!")
 print("👀 Ouvindo: @teamlive21 (SÓ ADMINS)")
 print("📤 Enviando para: @Live21streaming")
 print("✏️ Monitorando EDIÇÕES")
