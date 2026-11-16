@@ -1,14 +1,12 @@
 """
-BOT SERVER - MULTI ADM + MULTI CLIENTES
-Le do banco:
-- ADM: config_geral admin_origens / admin_destinos
-- CLIENTES: clientes_config (cliente_id, origens, destinos) OU clientes (origens, destinos)
-Cada origem copia para TODOS os destinos daquela pessoa. Pula se origem == destino.
+BOT SERVER - MULTI TOKEN - ADM com SESSION + CLIENTES com BOT TOKEN
+ADM: usa SESSION_STRING (sua conta) - le config_geral
+CLIENTES: usam Token do @BotFather - le clientes_config (cliente_id, origens, destinos, token)
+Cada cliente tem seu proprio bot. Sem API_ID, sem Colab.
 """
-import os, json
+import os, json, asyncio
 import pymysql
 from telethon import TelegramClient, events
-from telethon.sessions import StringSession
 
 API_ID = int(os.getenv('API_ID','0') or 0)
 API_HASH = os.getenv('API_HASH','')
@@ -25,118 +23,92 @@ def split_lista(s):
     return [limpar(x) for x in str(s or '').replace(';',',').split(',') if limpar(x)]
 
 def buscar_tudo():
-    regras = []  # lista de (dono, origem, destino)
+    adm_o, adm_d, clientes = [], [], []
     try:
         conn = pymysql.connect(host=DB_HOST,user=DB_USER,password=DB_PASS,database=DB_NAME,charset='utf8mb4',connect_timeout=10)
         cur = conn.cursor()
-        # ADM
         try:
             cur.execute("SELECT admin_origens, admin_destinos FROM config_geral WHERE id=1 LIMIT 1")
-            r = cur.fetchone()
-            if r:
-                for o in split_lista(r[0]):
-                    for d in split_lista(r[1]):
-                        if o.lower()!=d.lower(): regras.append(('ADM',o,d))
-                print(f"ADM: {split_lista(r[0])} x {split_lista(r[1])}")
+            r=cur.fetchone()
+            if r: adm_o, adm_d = split_lista(r[0]), split_lista(r[1])
         except Exception as e: print(f"ADM erro: {e}")
-        # CLIENTES - tenta clientes_config primeiro, depois clientes
         try:
-            cur.execute("SELECT cliente_id, origens, destinos FROM clientes_config")
-            for cid,o,d in cur.fetchall():
-                # so clientes ativos/teste - verifica status na tabela clientes
-                for oo in split_lista(o):
-                    for dd in split_lista(d):
-                        if oo.lower()!=dd.lower(): regras.append((f"CLI:{cid}",oo,dd))
-            print(f"clientes_config: {len(regras)} regras totais")
-        except Exception as e:
-            print(f"clientes_config nao existe ({e}), tentando clientes.origens")
-            try:
-                cur.execute("SELECT id, origens, destinos, status FROM clientes")
-                for cid,o,d,st in cur.fetchall():
-                    if str(st).lower() in ('pausado','bloqueado','vencido'): continue
-                    for oo in split_lista(o):
-                        for dd in split_lista(d):
-                            if oo.lower()!=dd.lower(): regras.append((f"CLI:{cid}",oo,dd))
-            except Exception as e2: print(f"clientes.origens erro: {e2}")
+            cur.execute("SELECT cliente_id, origens, destinos, token FROM clientes_config")
+            for cid,o,d,tok in cur.fetchall():
+                if tok and tok.strip():
+                    clientes.append({'id':cid,'origens':split_lista(o),'destinos':split_lista(d),'token':tok.strip()})
+        except Exception as e: print(f"clientes erro: {e}")
         cur.close(); conn.close()
-    except Exception as e:
-        print(f"❌ Erro DB: {e}")
-    print(f"📋 TOTAL: {len(regras)} regras")
-    for dono,o,d in regras: print(f"  {dono}: @{o} -> @{d}")
-    return regras
+    except Exception as e: print(f"DB erro: {e}")
+    print(f"ADM: {adm_o} x {adm_d}")
+    print(f"CLIENTES com Token: {len(clientes)}")
+    return adm_o, adm_d, clientes
 
-REGRAS = buscar_tudo()
-ORIGENS = sorted(list(set([o for _,o,_ in REGRAS])))
-DESTINOS_POR_ORIGEM = {}
-for dono,o,d in REGRAS:
-    DESTINOS_POR_ORIGEM.setdefault(o.lower(), []).append(d)
-if not ORIGENS: ORIGENS=['teamlive21']
-
-ARQ='mapa_multi.json'
-try:
-    with open(ARQ,'r',encoding='utf-8') as f: mapa=json.load(f)
-except: mapa={}
-def salvar_mapa():
+async def roda_bot_adm(origens, destinos):
+    if not origens or not SESSION_STRING: return
+    from telethon.sessions import StringSession
+    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+    mapa={}
     try:
-        with open(ARQ,'w',encoding='utf-8') as f: json.dump(mapa,f)
+        with open('mapa_adm.json','r',encoding='utf-8') as f: mapa=json.load(f)
     except: pass
-
-client = TelegramClient(StringSession(SESSION_STRING),API_ID,API_HASH) if SESSION_STRING else TelegramClient('sessao_live21',API_ID,API_HASH)
-MEUS_ENVIOS = set()  # ids que o proprio bot enviou, para nao copiar de novo e nao duplicar
-
-@client.on(events.NewMessage(chats=ORIGENS))
-async def nova(event):
-    # NAO ignora mais mensagem propria: se voce postar com sua conta, copia tambem.
-    # So ignora se for uma copia que o proprio bot acabou de enviar, para nao duplicar.
-    if event.message.id in MEUS_ENVIOS:
-        return
-    msg=event.message
-    if getattr(msg,'sticker',None): return
-    try:
-        ent=await event.get_chat()
-        origem=limpar(getattr(ent,'username',None) or '')
-    except: origem=''
-    if not origem: return
-    texto=msg.text or ""
-    for dest in DESTINOS_POR_ORIGEM.get(origem.lower(),[]):
+    def salvar():
         try:
-            if getattr(msg,'media',None):
-                enviada=await client.send_file(dest,msg.media,caption=texto if texto else None)
-            else:
-                if not texto: continue
-                enviada=await client.send_message(dest,texto)
-            eid=enviada[0].id if isinstance(enviada,list) else enviada.id
-            MEUS_ENVIOS.add(eid)
-            mapa[f"{origem}:{msg.id}:{dest}"]=eid
-            print(f"✅ @{origem} -> @{dest} (id {eid})")
-        except Exception as e: print(f"❌ @{origem} -> @{dest}: {e}")
-    salvar_mapa()
+            with open('mapa_adm.json','w',encoding='utf-8') as f: json.dump(mapa,f)
+        except: pass
+    @client.on(events.NewMessage(chats=origens))
+    async def nova(event):
+        try: ent=await event.get_chat(); origem=limpar(getattr(ent,'username',None) or '')
+        except: origem=''
+        for dest in destinos:
+            if dest.lower()==origem.lower(): continue
+            try:
+                msg=event.message
+                if getattr(msg,'media',None):
+                    env=await client.send_file(dest, msg.media, caption=msg.text or None)
+                else:
+                    if not msg.text: continue
+                    env=await client.send_message(dest, msg.text)
+                eid=env[0].id if isinstance(env,list) else env.id
+                mapa[f"{origem}:{msg.id}:{dest}"]=eid
+                print(f"✅ ADM @{origem} -> @{dest}")
+            except Exception as e: print(f"❌ ADM @{origem} -> @{dest}: {e}")
+        salvar()
+    print(f"🚀 ADM ligado ouvindo {origens}")
+    await client.start()
+    await client.run_until_disconnected()
 
-@client.on(events.MessageEdited(chats=ORIGENS))
-async def editada(event):
-    msg=event.message
-    if msg.id in MEUS_ENVIOS: return
-    try:
-        ent=await event.get_chat(); origem=limpar(getattr(ent,'username',None) or '')
-    except: origem=''
-    for dest in DESTINOS_POR_ORIGEM.get(origem.lower(),[]):
-        chave=f"{origem}:{msg.id}:{dest}"; id_dest=mapa.get(chave)
-        if not id_dest: continue
-        try: await client.edit_message(dest,id_dest,msg.text or ""); print(f"✏️ Editado @{dest}")
-        except Exception as e: print(f"❌ Editar @{dest}: {e}")
+async def roda_bot_cliente(cli):
+    # Bot do cliente usa Token, nao precisa API_ID/HASH do cliente
+    client = TelegramClient(f"bot_{cli['id']}", API_ID, API_HASH)
+    await client.start(bot_token=cli['token'])
+    print(f"🤖 Cliente {cli['id']} ligado: {cli['origens']} -> {cli['destinos']}")
+    @client.on(events.NewMessage(chats=cli['origens']))
+    async def nova(event):
+        try: ent=await event.get_chat(); origem=limpar(getattr(ent,'username',None) or '')
+        except: origem=''
+        for dest in cli['destinos']:
+            if dest.lower()==origem.lower(): continue
+            try:
+                msg=event.message
+                if getattr(msg,'media',None):
+                    await client.send_file(dest, msg.media, caption=msg.text or None)
+                else:
+                    if not msg.text: continue
+                    await client.send_message(dest, msg.text)
+                print(f"✅ CLI {cli['id']} @{origem} -> @{dest}")
+            except Exception as e: print(f"❌ CLI {cli['id']} @{origem} -> @{dest}: {e}")
+    await client.run_until_disconnected()
 
-@client.on(events.MessageDeleted(chats=ORIGENS))
-async def apagada(event):
-    for id_origem in event.deleted_ids:
-        for chave in [k for k in list(mapa.keys()) if k.split(':')[1]==str(id_origem)]:
-            dest=chave.split(':')[2]
-            try: await client.delete_messages(dest,mapa[chave]); print(f"🗑️ Apagado @{dest}"); del mapa[chave]
-            except Exception as e: print(f"❌ Apagar @{dest}: {e}")
-        salvar_mapa()
+async def main():
+    adm_o, adm_d, clientes = buscar_tudo()
+    tarefas=[]
+    if adm_o: tarefas.append(roda_bot_adm(adm_o, adm_d))
+    for cli in clientes: tarefas.append(roda_bot_cliente(cli))
+    if not tarefas:
+        print("Nenhum bot para ligar. ADM sem origens ou nenhum cliente com Token.")
+        return
+    await asyncio.gather(*tarefas)
 
-print("🚀 BOT MULTI ADM + CLIENTES ligado!")
-print(f"👀 Ouvindo: {ORIGENS}")
-print(f"📤 Regras: {len(REGRAS)}")
-print("Aguardando...")
-client.start()
-client.run_until_disconnected()
+print("🚀 BOT SERVER MULTI TOKEN ligado!")
+asyncio.run(main())
