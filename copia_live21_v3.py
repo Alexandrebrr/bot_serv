@@ -4,7 +4,8 @@ Live21 BOT - LIGADO NO PAINEL NOVO botserv.pro
 - So copia se status = Ativo ou Teste e dentro do vencimento / trial
 - Bloqueado / Vencido / Pendente = NAO copia
 - Origens/destinos vem do painel, nao fixo no codigo
-- Mantem fallback: se o banco falhar, copia @teamlive21 -> @Live21streaming (Alexandre / Live21)
+- ADM tambem e filho de Deus: 5 origens + 5 destinos do ADM
+- Mantem fallback: se o banco falhar, copia @teamlive21 -> @Live21streaming
 - Foto como foto, album junto, edicao e exclusao sincronizadas
 """
 import os, json, asyncio, io
@@ -23,7 +24,7 @@ DB_NAME = os.getenv('DB_NAME','u574433089_bot_serv')
 # Fallback Live21 (se banco nao responder)
 FALLBACK = [('@teamlive21','@Live21streaming')]
 
-mapa = {}  # (origem_id, msg_id) -> [(destino, msg_id_destino)]
+mapa = {}
 try:
     import pymysql
     HAS_MYSQL = True
@@ -83,7 +84,24 @@ def buscar_regras():
             for o in origens:
                 for dest in destinos:
                     regras.append((o, dest))
+        # ADM tambem e filho de Deus: 5 origens + 5 destinos do ADM - JA COLOCADO NO LUGAR CERTO
+        try:
+            cur.execute("SELECT admin_origens, admin_destinos FROM config_geral WHERE id=1 LIMIT 1")
+            row=cur.fetchone()
+            if row:
+                ao=[limpar(x) for x in str(row[0] or '').split(',') if limpar(x)]
+                ad=[limpar(x) for x in str(row[1] or '').split(',') if limpar(x)]
+                for o in ao:
+                    for dest in ad:
+                        regras.append((o, dest))
+                if ao and ad:
+                    print(f'ADM: {len(ao)} origens x {len(ad)} destinos = {len(ao)*len(ad)} regras', flush=True)
+        except Exception as e:
+            print(f'ADM sem origens no config_geral (ok, usa clientes): {e}', flush=True)
         conn.close()
+        if not regras and rows:
+            print('Tem cliente no banco mas sem origem/destino salvo - usando fallback Live21 ate o painel salvar', flush=True)
+            return FALLBACK
         if not regras:
             print('Nenhum cliente liberado no painel, usando fallback Live21', flush=True)
             return FALLBACK
@@ -100,7 +118,6 @@ async def main():
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
     await client.start()
     print('✅ Conectado no Telegram - BOT LIGADO NO PAINEL NOVO', flush=True)
-
     regras = buscar_regras()
     origens = list(set([o for o,_ in regras]))
     async def recarregar():
@@ -109,9 +126,7 @@ async def main():
             await asyncio.sleep(60)
             regras = buscar_regras()
             origens = list(set([o for o,_ in regras]))
-
     asyncio.create_task(recarregar())
-
     @client.on(events.NewMessage())
     async def copiar(event):
         try:
@@ -157,7 +172,6 @@ async def main():
                     print(f'Erro enviar para {dest}: {e}', flush=True)
         except Exception as e:
             print(f'Erro copiar: {e}', flush=True)
-
     @client.on(events.MessageEdited())
     async def editar(event):
         try:
@@ -171,7 +185,6 @@ async def main():
                         print(f'Erro editar {dest}: {e}', flush=True)
         except Exception as e:
             print(f'Erro editar: {e}', flush=True)
-
     @client.on(events.MessageDeleted())
     async def deletar(event):
         try:
@@ -186,7 +199,6 @@ async def main():
                             print(f'Erro apagar {dest}: {e}', flush=True)
         except Exception as e:
             print(f'Erro deletar: {e}', flush=True)
-
     print('Aguardando... (lendo painel novo a cada 60s)', flush=True)
     await client.run_until_disconnected()
 
