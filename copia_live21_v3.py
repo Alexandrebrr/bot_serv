@@ -1,198 +1,143 @@
 """
-Live21 BOT - LIGADO NO PAINEL NOVO botserv.pro
-- ADM: 5 origens + 5 destinos
-- Pula quando origem == destino (nao copia pra ele mesmo)
+BOT SERVER - Live21 MULTI ORIGEM x MULTI DESTINO
+Le do painel: config_geral admin_origens / admin_destinos
+Ex: admin_origens = teamlive21,Live21streaming
+    admin_destinos = Live21streaming,Lv21GrupoAberto
+Regra: toda origem copia para TODOS os destinos, menos se origem == destino
 """
-import os, json, asyncio, io
+import os, json, asyncio
+import pymysql
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
-API_ID = int(os.getenv('API_ID','0') or '0')
-API_HASH = os.getenv('API_HASH','')
-SESSION_STRING = os.getenv('SESSION_STRING','')
-DB_HOST = os.getenv('DB_HOST','')
-DB_USER = os.getenv('DB_USER','')
-DB_PASS = os.getenv('DB_PASS','')
-DB_NAME = os.getenv('DB_NAME','u574433089_bot_serv')
-FALLBACK = [('@teamlive21','@Live21streaming')]
-mapa = {}
-try:
-    import pymysql
-    HAS_MYSQL = True
-except:
-    HAS_MYSQL = False
-    print('Aviso: pymysql nao instalado, usando fallback Live21', flush=True)
+API_ID = int(os.getenv('API_ID', '0') or 0)
+API_HASH = os.getenv('API_HASH', '')
+SESSION_STRING = os.getenv('SESSION_STRING', '')
 
-def limpar(v):
-    v=(v or '').strip().replace('https://t.me/','').replace('http://t.me/','').replace('t.me/','').replace('@','')
-    return v.split('/')[0].strip()
+DB_HOST = os.getenv('DB_HOST', 'srv1524.hstgr.io')
+DB_USER = os.getenv('DB_USER', 'u574433089_bot_serv')
+DB_PASS = os.getenv('DB_PASS', '')
+DB_NAME = os.getenv('DB_NAME', 'u574433089_bot_serv')
 
-def hoje():
-    from datetime import date
-    return date.today().isoformat()
+def limpar(nome):
+    if not nome: return ''
+    nome = str(nome).strip().replace('@','').replace('https://t.me/','').replace('t.me/','').strip('/').strip()
+    return nome
 
 def buscar_regras():
-    if not HAS_MYSQL or not DB_HOST or not DB_USER:
-        print('Banco nao configurado, usando fallback Live21', flush=True)
-        return FALLBACK
     try:
-        conn = pymysql.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME, charset='utf8mb4', connect_timeout=8)
+        conn = pymysql.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME, charset='utf8mb4', connect_timeout=10)
         cur = conn.cursor()
-        cur.execute("SHOW COLUMNS FROM clientes")
-        cols = [c[0] for c in cur.fetchall()]
-        cur.execute("SELECT * FROM clientes")
-        rows = cur.fetchall()
-        regras=[]
-        h=hoje()
-        for r in rows:
-            d=dict(zip(cols, r))
-            status=(str(d.get('status') or '')).strip()
-            if status in ('Bloqueado','Vencido','Pendente','Inativo','Pausado'):
-                continue
-            venc=str(d.get('venc') or d.get('vencimento') or d.get('data_vencimento') or '')
-            trial=str(d.get('trialFim') or d.get('trial_fim') or d.get('fim_teste') or '')
-            if status=='Teste' and trial and trial < h:
-                continue
-            if status=='Ativo' and venc and venc < h:
-                continue
-            origens=[]
-            destinos=[]
-            for k,v in d.items():
-                if not v: continue
-                kl=k.lower()
-                if 'origem' in kl:
-                    origens.append(limpar(str(v)))
-                if 'destino' in kl:
-                    destinos.append(limpar(str(v)))
-            for k in ('origens','destinos','origem','destino'):
-                if k in d and d[k]:
-                    vals=[limpar(x) for x in str(d[k]).split(',') if limpar(x)]
-                    if k.startswith('orig'): origens.extend(vals)
-                    else: destinos.extend(vals)
-            origens=[x for x in dict.fromkeys(origens) if x]
-            destinos=[x for x in dict.fromkeys(destinos) if x]
-            for o in origens:
-                for dest in destinos:
-                    if o.lower()==dest.lower():
-                        continue
-                    regras.append((o, dest))
-        # ADM: 5 origens + 5 destinos - PULA SE FOR IGUAL
-        try:
-            cur.execute("SELECT admin_origens, admin_destinos FROM config_geral WHERE id=1 LIMIT 1")
-            row=cur.fetchone()
-            if row:
-                ao=[limpar(x) for x in str(row[0] or '').split(',') if limpar(x)]
-                ad=[limpar(x) for x in str(row[1] or '').split(',') if limpar(x)]
-                for o in ao:
-                    for dest in ad:
-                        if o.lower()==dest.lower():
-                            continue
-                        regras.append((o, dest))
-                if ao and ad:
-                    print(f'ADM: {len(ao)} origens x {len(ad)} destinos', flush=True)
-        except Exception as e:
-            print(f'ADM sem origens no config_geral (ok, usa clientes): {e}', flush=True)
-        conn.close()
-        if not regras and rows:
-            print('Tem cliente no banco mas sem origem/destino salvo - usando fallback Live21', flush=True)
-            return FALLBACK
-        if not regras:
-            print('Nenhum cliente liberado no painel, usando fallback Live21', flush=True)
-            return FALLBACK
-        print(f'Painel novo: {len(regras)} regras liberadas: {regras}', flush=True)
-        return regras
+        cur.execute("SELECT admin_origens, admin_destinos FROM config_geral WHERE id=1 LIMIT 1")
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if not row:
+            print("⚠️ config_geral vazio")
+            return [], []
+        origens = [limpar(x) for x in str(row[0] or '').split(',') if limpar(x)]
+        destinos = [limpar(x) for x in str(row[1] or '').split(',') if limpar(x)]
+        print(f"📋 PAINEL: {len(origens)} origens {origens} x {len(destinos)} destinos {destinos}")
+        return origens, destinos
     except Exception as e:
-        print(f'Erro ler painel: {e} - usando fallback Live21', flush=True)
-        return FALLBACK
+        print(f"❌ Erro DB: {e}")
+        # fallback pelas variaveis do Railway se o banco falhar
+        o = [limpar(x) for x in os.getenv('ADMIN_ORIGENS','teamlive21').split(',') if limpar(x)]
+        d = [limpar(x) for x in os.getenv('ADMIN_DESTINOS','Live21streaming').split(',') if limpar(x)]
+        return o, d
 
-async def main():
-    if not SESSION_STRING:
-        print('ERRO: SESSION_STRING vazio no Railway', flush=True)
-        return
-    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-    await client.start()
-    print('✅ Conectado no Telegram - BOT LIGADO NO PAINEL NOVO', flush=True)
-    regras = buscar_regras()
-    async def recarregar():
-        nonlocal regras
-        while True:
-            await asyncio.sleep(60)
-            regras = buscar_regras()
-    asyncio.create_task(recarregar())
-    @client.on(events.NewMessage())
-    async def copiar(event):
+ORIGENS, DESTINOS = buscar_regras()
+if not ORIGENS: ORIGENS = ['teamlive21']
+if not DESTINOS: DESTINOS = ['Live21streaming']
+
+# mapa: "origem_id:destino" -> id destino. Salva em arquivo
+ARQ = 'mapa_multi.json'
+try:
+    with open(ARQ,'r',encoding='utf-8') as f: mapa = json.load(f)
+except: mapa = {}
+def salvar_mapa():
+    try:
+        with open(ARQ,'w',encoding='utf-8') as f: json.dump(mapa,f)
+    except Exception as e: print(f"Erro salvar mapa: {e}")
+
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH) if SESSION_STRING else TelegramClient('sessao_live21', API_ID, API_HASH)
+
+async def copiar_para_todos(event, texto_base, media=None):
+    msg = event.message
+    origem_atual = limpar(getattr(event.chat,'username',None) or '')
+    # se nao tem username, descobre pelo chat_id comparando? usa o chat title - fallback: tenta por id
+    # Melhor: identifica origem pelo event.chat_id e resolve depois; aqui usamos o nome do chat
+    # Para garantir, pegamos a entidade
+    try:
+        ent = await event.get_chat()
+        origem_atual = limpar(getattr(ent,'username',None) or origem_atual)
+    except: pass
+    print(f"📩 Nova em @{origem_atual} id={msg.id} texto={ (texto_base or '')[:60]}")
+    for dest in DESTINOS:
+        if dest.lower() == origem_atual.lower():
+            print(f"⏭️ Pula {dest} porque é igual a origem")
+            continue
         try:
+            if media:
+                enviada = await client.send_file(dest, media, caption=texto_base)
+            else:
+                if not texto_base: continue
+                enviada = await client.send_message(dest, texto_base)
+            eid = enviada[0].id if isinstance(enviada, list) else enviada.id
+            chave = f"{origem_atual}:{msg.id}:{dest}"
+            mapa[chave] = eid
+            print(f"✅ @{origem_atual} -> @{dest} (dest id {eid})")
+        except Exception as e:
+            print(f"❌ Erro @{origem_atual} -> @{dest}: {e}")
+    salvar_mapa()
+
+@client.on(events.NewMessage(chats=ORIGENS))
+async def nova(event):
+    if getattr(event,'out',False): return
+    msg = event.message
+    if getattr(msg,'sticker',None): return
+    texto = msg.text or ""
+    # sem assinatura verde fixa, copia limpo como voce pediu
+    await copiar_para_todos(event, texto, media=msg.media if getattr(msg,'media',None) else None)
+
+@client.on(events.MessageEdited(chats=ORIGENS))
+async def editada(event):
+    msg = event.message
+    if getattr(event,'out',False): return
+    try:
+        ent = await event.get_chat()
+        origem_atual = limpar(getattr(ent,'username',None) or '')
+    except: origem_atual = ''
+    texto = msg.text or ""
+    for dest in DESTINOS:
+        if dest.lower() == origem_atual.lower(): continue
+        chave = f"{origem_atual}:{msg.id}:{dest}"
+        id_dest = mapa.get(chave)
+        if not id_dest: continue
+        try:
+            await client.edit_message(dest, id_dest, texto)
+            print(f"✏️ Editado @{dest} id {id_dest}")
+        except Exception as e:
+            print(f"❌ Erro editar @{dest}: {e}")
+
+@client.on(events.MessageDeleted(chats=ORIGENS))
+async def apagada(event):
+    # deleted_ids vem sem saber a origem, entao apaga em todos os destinos que tem esse id de origem
+    for id_origem in event.deleted_ids:
+        chaves = [k for k in list(mapa.keys()) if k.split(':')[1] == str(id_origem)]
+        for chave in chaves:
+            dest = chave.split(':')[2]
+            id_dest = mapa.get(chave)
             try:
-                chat = await event.get_chat()
-                username = getattr(chat, 'username', '') or ''
-                chat_id = event.chat_id
-            except:
-                return
-            dests=[]
-            for o,dest in regras:
-                if o.lower()==username.lower() or str(chat_id)==str(o):
-                    dests.append(dest)
-            if not dests:
-                return
-            msg=event.message
-            if not msg: return
-            texto=msg.text or ''
-            if getattr(msg,'sticker',None):
-                return
-            print(f'📩 Copiando de @{username} para {dests}: {texto[:60]}', flush=True)
-            for dest in dests:
-                try:
-                    if msg.media:
-                        buf=io.BytesIO()
-                        await client.download_media(msg, file=buf)
-                        buf.seek(0)
-                        if getattr(msg,'photo',None):
-                            buf.name='foto.jpg'
-                        elif getattr(msg,'video',None):
-                            buf.name='video.mp4'
-                        else:
-                            buf.name='arquivo'
-                        enviado=await client.send_file(dest, buf, caption=texto if texto else None, force_document=False)
-                    else:
-                        if texto:
-                            enviado=await client.send_message(dest, texto)
-                        else:
-                            continue
-                    mapa[(event.chat_id, event.id)] = mapa.get((event.chat_id, event.id),[])+[(dest, enviado.id)]
-                    print(f'✅ Copiado para @{dest}', flush=True)
-                except Exception as e:
-                    print(f'Erro enviar para {dest}: {e}', flush=True)
-        except Exception as e:
-            print(f'Erro copiar: {e}', flush=True)
-    @client.on(events.MessageEdited())
-    async def editar(event):
-        try:
-            chaves=[k for k in mapa if k[1]==event.id]
-            for k in chaves:
-                for dest, mid in mapa[k]:
-                    try:
-                        await client.edit_message(dest, mid, event.message.text or '')
-                        print(f'✏️ Editado em @{dest}', flush=True)
-                    except Exception as e:
-                        print(f'Erro editar {dest}: {e}', flush=True)
-        except Exception as e:
-            print(f'Erro editar: {e}', flush=True)
-    @client.on(events.MessageDeleted())
-    async def deletar(event):
-        try:
-            for mid in event.deleted_ids:
-                chaves=[k for k in mapa if k[1]==mid]
-                for k in chaves:
-                    for dest, did in mapa[k]:
-                        try:
-                            await client.delete_messages(dest, did)
-                            print(f'🗑️ Apagado em @{dest}', flush=True)
-                        except Exception as e:
-                            print(f'Erro apagar {dest}: {e}', flush=True)
-        except Exception as e:
-            print(f'Erro deletar: {e}', flush=True)
-    print('Aguardando... (lendo painel novo a cada 60s)', flush=True)
-    await client.run_until_disconnected()
+                await client.delete_messages(dest, id_dest)
+                print(f"🗑️ Apagado @{dest} id {id_dest}")
+                del mapa[chave]
+            except Exception as e:
+                print(f"❌ Erro apagar @{dest}: {e}")
+        salvar_mapa()
 
-if __name__=='__main__':
-    asyncio.run(main())
+print("🚀 BOT MULTI ligado!")
+print(f"👀 Ouvindo: {ORIGENS}")
+print(f"📤 Enviando para: {DESTINOS}")
+print("Aguardando...")
+client.start()
+client.run_until_disconnected()
