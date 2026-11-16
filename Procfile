@@ -1,1 +1,1 @@
-worker: python copia_live21_v7_SEM_FLASK.py
+worker: python copia_live21_v8_QR.py
