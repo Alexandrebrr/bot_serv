@@ -82,10 +82,14 @@ def salvar_mapa():
     except: pass
 
 client = TelegramClient(StringSession(SESSION_STRING),API_ID,API_HASH) if SESSION_STRING else TelegramClient('sessao_live21',API_ID,API_HASH)
+MEUS_ENVIOS = set()  # ids que o proprio bot enviou, para nao copiar de novo e nao duplicar
 
 @client.on(events.NewMessage(chats=ORIGENS))
 async def nova(event):
-    if getattr(event,'out',False): return
+    # NAO ignora mais mensagem propria: se voce postar com sua conta, copia tambem.
+    # So ignora se for uma copia que o proprio bot acabou de enviar, para nao duplicar.
+    if event.message.id in MEUS_ENVIOS:
+        return
     msg=event.message
     if getattr(msg,'sticker',None): return
     try:
@@ -102,6 +106,7 @@ async def nova(event):
                 if not texto: continue
                 enviada=await client.send_message(dest,texto)
             eid=enviada[0].id if isinstance(enviada,list) else enviada.id
+            MEUS_ENVIOS.add(eid)
             mapa[f"{origem}:{msg.id}:{dest}"]=eid
             print(f"✅ @{origem} -> @{dest} (id {eid})")
         except Exception as e: print(f"❌ @{origem} -> @{dest}: {e}")
@@ -110,7 +115,7 @@ async def nova(event):
 @client.on(events.MessageEdited(chats=ORIGENS))
 async def editada(event):
     msg=event.message
-    if getattr(event,'out',False): return
+    if msg.id in MEUS_ENVIOS: return
     try:
         ent=await event.get_chat(); origem=limpar(getattr(ent,'username',None) or '')
     except: origem=''
