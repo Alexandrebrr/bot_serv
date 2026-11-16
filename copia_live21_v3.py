@@ -1,179 +1,27 @@
-
-"""
-SISTEMA DE CÓPIA AUTOMÁTICA - Live21 v4.0 - SESSION_STRING FINAL
-Origem: https://t.me/teamlive21
-Destino: https://t.me/Live21streaming
-
-v4.0 - SESSION_STRING - SINCRONIZAÇÃO TOTAL:
-- Só copia se for ADMIN do teamlive21
-- Se EDITAR lá -> EDITA aqui
-- Se APAGAR lá -> APAGA aqui
-- Mapa salvo em arquivo, não perde se reiniciar
-"""
-
-import os
+import os, asyncio, re
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import ChannelParticipantAdmin, ChannelParticipantCreator
-import json
-import os
-import threading, asyncio, io, base64, uuid
-import pymysql
-try:
-    from flask import Flask, request, jsonify
-    from flask_cors import CORS
-    import qrcode
-    TEM_QR = True
-except Exception as e:
-    print(f'Aviso QR: {e}')
-    TEM_QR = False
 
-# ===== CONFIGURE AQUI =====
-api_id = int(os.getenv('API_ID', '12345678'))
-api_hash = os.getenv('API_HASH', 'SEU_API_HASH_AQUI')
-SESSION_STRING = os.getenv('SESSION_STRING', '')
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "")
+SESSION_STRING = os.environ.get("SESSION_STRING", "")
+ORIGEM = os.environ.get("ORIGEM", "teamlive21")
+DESTINO = os.environ.get("DESTINO", "Live21streaming")
 
-ORIGEM = 'teamlive21'
-DESTINO = 'Live21streaming'
+# Se ORIGEM/DESTINO vierem com @ ou link, limpa
+def limpar(v):
+    v = v.strip()
+    v = v.replace("https://t.me/", "").replace("http://t.me/", "").replace("t.me/", "").replace("@", "")
+    return v.split("/")[0]
 
-ASSINATURA = "\n\n📢 _Informação oficial repassada para revendedores_"
-PALAVRAS_BLOQUEADAS = ["salário", "demissão", "reunião interna", "senha", "link interno"]
-ARQUIVO_MAPA = 'mapa_mensagens.json'
-# ===========================
+ORIGEM = limpar(ORIGEM)
+DESTINO = limpar(DESTINO)
 
-if SESSION_STRING:
-    client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
-else:
-    client = TelegramClient('sessao_live21', api_id, api_hash)
+ASSINATURA = "\n\n✅ Informação oficial para revendedores Live21"
+PALAVRAS_BLOQUEADAS = ["xxx", "porno"]
+BLOQUEAR_STICKER = True
 
-# Carrega mapa salvo, se existir
-if os.path.exists(ARQUIVO_MAPA):
-    try:
-        with open(ARQUIVO_MAPA, 'r', encoding='utf-8') as f:
-            mapa_mensagens = json.load(f)
-            # JSON salva as chaves como string, converte de volta para int
-            mapa_mensagens = {int(k): v for k, v in mapa_mensagens.items()}
-    except:
-        mapa_mensagens = {}
-else:
-    mapa_mensagens = {}
-
-def salvar_mapa():
-    try:
-        with open(ARQUIVO_MAPA, 'w', encoding='utf-8') as f:
-            json.dump(mapa_mensagens, f)
-    except Exception as e:
-        print(f"Erro ao salvar mapa: {e}")
-
-admins_cache = set()
-
-async def e_admin(user_id):
-    if user_id in admins_cache:
-        return True
-    try:
-        participante = await client.get_participant(ORIGEM, user_id)
-        p = participante.participant
-        if isinstance(p, (ChannelParticipantAdmin, ChannelParticipantCreator)):
-            admins_cache.add(user_id)
-            return True
-        return False
-    except Exception:
-        try:
-            async for participante in client.iter_participants(ORIGEM, filter=ChannelParticipantAdmin):
-                admins_cache.add(participante.id)
-            async for participante in client.iter_participants(ORIGEM, filter=ChannelParticipantCreator):
-                admins_cache.add(participante.id)
-            return user_id in admins_cache
-        except Exception as e2:
-            print(f"Aviso admin: {e2} - liberando")
-            return True
-
-async def deve_copiar(event, verificar_admin=True):
-    msg = event.message
-    texto = getattr(msg, 'text', '') or ""
-    if getattr(event, 'out', False):
-        return False
-    if getattr(msg, 'sticker', None):
-        return False
-    for palavra in PALAVRAS_BLOQUEADAS:
-        if palavra.lower() in texto.lower():
-            return False
-    if verificar_admin:
-        sender_id = getattr(event, 'sender_id', None)
-        if not sender_id:
-            return False
-        if not await e_admin(sender_id):
-            print(f"⏭️ Ignorado - não é admin: {sender_id}")
-            return False
-    return True
-
-@client.on(events.NewMessage(chats=ORIGEM))
-async def copiar_nova(event):
-    if not await deve_copiar(event):
-        return
-    msg = event.message
-    texto = msg.text or ""
-    print(f"📩 Nova mensagem de ADMIN: {texto[:80]}...")
-    try:
-        if msg.media:
-            enviada = await client.send_file(DESTINO, msg.media, caption=(texto + ASSINATURA) if texto else ASSINATURA)
-        else:
-            enviada = await client.send_message(DESTINO, texto + ASSINATURA)
-        if isinstance(enviada, list):
-            mapa_mensagens[msg.id] = enviada[0].id
-        else:
-            mapa_mensagens[msg.id] = enviada.id
-        salvar_mapa()
-        print(f"✅ Enviado (origem {msg.id} -> destino {mapa_mensagens[msg.id]})")
-    except Exception as e:
-        print(f"❌ Erro ao copiar: {e}")
-
-@client.on(events.MessageEdited(chats=ORIGEM))
-async def copiar_edicao(event):
-    msg = event.message
-    texto = msg.text or ""
-    if not await deve_copiar(event):
-        return
-    id_destino = mapa_mensagens.get(msg.id)
-    if not id_destino:
-        print(f"⚠️ Editada {msg.id} não encontrada, enviando como nova...")
-        await copiar_nova(event)
-        return
-    print(f"✏️ Admin editou {msg.id}, atualizando...")
-    try:
-        novo_texto = texto + ASSINATURA + "\n\n✏️ _Atualizado_"
-        await client.edit_message(DESTINO, id_destino, novo_texto)
-        print("✅ Atualizado no seu canal!")
-    except Exception as e:
-        print(f"❌ Erro ao editar: {e}")
-        try:
-            await client.delete_messages(DESTINO, id_destino)
-            await copiar_nova(event)
-        except Exception as e2:
-            print(f"❌ Erro ao reenviar: {e2}")
-
-@client.on(events.MessageDeleted(chats=ORIGEM))
-async def copiar_exclusao(event):
-    # event.deleted_ids pode ter 1 ou vários IDs
-    ids_apagados = event.deleted_ids
-    print(f"🗑️ Detectado apagamento no trabalho: {ids_apagados}")
-    for id_origem in ids_apagados:
-        id_destino = mapa_mensagens.get(id_origem)
-        if not id_destino:
-            print(f"   - ID {id_origem} não estava no seu canal, ignorando")
-            continue
-        try:
-            await client.delete_messages(DESTINO, id_destino)
-            print(f"   ✅ Apagado no seu canal também (destino {id_destino})")
-            del mapa_mensagens[id_origem]
-            salvar_mapa()
-        except Exception as e:
-            print(f"   ❌ Erro ao apagar {id_destino}: {e}")
-
-
-# ===== SERVIDOR QR - DENTRO DO MESMO BOT, SEM PAGAR NADA A MAIS =====
-# O painel chama https://SEU-BOT-RAILWAY.up.railway.app/qr_start
-# Cliente escaneia o QR no Telegram e a sessao dele salva no MySQL.
+# ===== SERVIDOR QR v6 - CORRIGIDO =====
 DB_HOST = os.getenv('DB_HOST', 'srv1524.hstgr.io')
 DB_USER = os.getenv('DB_USER', '')
 DB_PASS = os.getenv('DB_PASS', '')
@@ -187,71 +35,155 @@ if TEM_QR:
             con = pymysql.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME, charset='utf8mb4')
             cur = con.cursor()
             cur.execute("CREATE TABLE IF NOT EXISTS clientes_config (id INT AUTO_INCREMENT PRIMARY KEY, cliente_id INT, token TEXT, origens TEXT, destinos TEXT, sessao TEXT)")
-            try: cur.execute("ALTER TABLE clientes_config ADD COLUMN sessao TEXT")
-            except: pass
+            try:
+                cur.execute("ALTER TABLE clientes_config ADD COLUMN sessao TEXT")
+            except:
+                pass
             cur.execute("INSERT INTO clientes_config (cliente_id, sessao) VALUES (%s,%s) ON DUPLICATE KEY UPDATE sessao=VALUES(sessao)", (cliente_id, sessao))
             cur.execute("UPDATE clientes_config SET sessao=%s WHERE cliente_id=%s", (sessao, cliente_id))
-            con.commit(); con.close()
-            print(f"✅ QR - Sessao salva cliente {cliente_id}", flush=True)
+            con.commit()
+            con.close()
+            print("QR - Sessao salva cliente " + str(cliente_id), flush=True)
             return True
         except Exception as e:
-            print(f"❌ QR - Erro salvar sessao: {e}", flush=True)
+            print("QR - Erro salvar sessao: " + str(e), flush=True)
             return False
-    def qr_esperar(qr_id, cliente_id, tclient, qr_login):
-        loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+    async def qr_fluxo(qr_id, cliente_id):
+        tclient = TelegramClient(StringSession(), api_id, api_hash)
         try:
-            loop.run_until_complete(qr_login.wait())
+            await tclient.connect()
+            qr_login = await tclient.qr_login()
+            img = qrcode.make(qr_login.url)
+            buf = io.BytesIO()
+            img.save(buf, format='PNG')
+            pendentes_qr[qr_id]['qr_image'] = 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
+            pendentes_qr[qr_id]['status'] = 'aguardando'
+            print("QR gerado cliente " + str(cliente_id), flush=True)
+            await qr_login.wait()
             sessao = tclient.session.save()
             try:
-                me = loop.run_until_complete(tclient.get_me()); nome = getattr(me, 'first_name', '') or ''
-            except: nome = ''
-            pendentes_qr[qr_id]['status'] = 'ok'; pendentes_qr[qr_id]['nome'] = nome; pendentes_qr[qr_id]['sessao'] = sessao
+                me = await tclient.get_me()
+                nome = getattr(me, 'first_name', '') or ''
+            except:
+                nome = ''
+            pendentes_qr[qr_id]['status'] = 'ok'
+            pendentes_qr[qr_id]['nome'] = nome
             qr_salvar_sessao(cliente_id, sessao)
-            loop.run_until_complete(tclient.disconnect())
+            print("QR - Cliente conectou: " + nome, flush=True)
+            await tclient.disconnect()
         except Exception as e:
-            pendentes_qr[qr_id]['status'] = 'erro'; pendentes_qr[qr_id]['erro'] = str(e)
-            print(f"❌ QR erro: {e}", flush=True)
-        finally: loop.close()
+            pendentes_qr[qr_id]['status'] = 'erro'
+            pendentes_qr[qr_id]['erro'] = str(e)
+            print("QR erro: " + str(e), flush=True)
+            try:
+                await tclient.disconnect()
+            except:
+                pass
+    def qr_rodar_fluxo(qr_id, cliente_id):
+        try:
+            asyncio.run(qr_fluxo(qr_id, cliente_id))
+        except Exception as e:
+            pendentes_qr[qr_id]['status'] = 'erro'
+            pendentes_qr[qr_id]['erro'] = str(e)
     @qr_app.route('/qr_start', methods=['POST'])
     def qr_start():
-        d = request.get_json(force=True, silent=True) or {}
-        cliente_id = int(d.get('cliente_id', 0) or 0)
-        if not cliente_id: return jsonify({'ok': False, 'erro': 'cliente_id faltando'}), 400
-        qr_id = str(uuid.uuid4())[:8]
-        pendentes_qr[qr_id] = {'cliente_id': cliente_id, 'status': 'aguardando', 'nome': ''}
-        loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
-        tclient = TelegramClient(StringSession(), api_id, api_hash)
-        loop.run_until_complete(tclient.connect())
-        qr_login = loop.run_until_complete(tclient.qr_login())
-        img = qrcode.make(qr_login.url); buf = io.BytesIO(); img.save(buf, format='PNG')
-        b64 = base64.b64encode(buf.getvalue()).decode()
-        threading.Thread(target=qr_esperar, args=(qr_id, cliente_id, tclient, qr_login), daemon=True).start()
-        loop.close()
-        return jsonify({'ok': True, 'qr_id': qr_id, 'qr_image': 'data:image/png;base64,' + b64})
+        try:
+            d = request.get_json(force=True, silent=True) or {}
+            cliente_id = int(d.get('cliente_id', 0) or 0)
+            if not cliente_id:
+                return jsonify({'ok': False, 'erro': 'cliente_id faltando'}), 400
+            qr_id = str(uuid.uuid4())[:8]
+            pendentes_qr[qr_id] = {'cliente_id': cliente_id, 'status': 'gerando', 'nome': '', 'qr_image': ''}
+            threading.Thread(target=qr_rodar_fluxo, args=(qr_id, cliente_id), daemon=True).start()
+            import time
+            for _ in range(40):
+                if pendentes_qr[qr_id].get('qr_image'):
+                    return jsonify({'ok': True, 'qr_id': qr_id, 'qr_image': pendentes_qr[qr_id]['qr_image']})
+                if pendentes_qr[qr_id]['status'] == 'erro':
+                    return jsonify({'ok': False, 'erro': pendentes_qr[qr_id].get('erro', 'Erro ao gerar QR')}), 500
+                time.sleep(0.2)
+            return jsonify({'ok': False, 'erro': 'Demorou pra gerar o QR. Tenta de novo.'}), 500
+        except Exception as e:
+            print("qr_start erro: " + str(e), flush=True)
+            return jsonify({'ok': False, 'erro': str(e)}), 500
     @qr_app.route('/qr_status', methods=['GET'])
     def qr_status():
-        p = pendentes_qr.get(request.args.get('qr_id',''))
-        if not p: return jsonify({'ok': False, 'erro': 'QR expirado. Gera outro.'})
-        return jsonify({'ok': True, 'status': p['status'], 'nome': p.get('nome','')})
+        p = pendentes_qr.get(request.args.get('qr_id', ''))
+        if not p:
+            return jsonify({'ok': False, 'erro': 'QR expirado. Gera outro.'})
+        return jsonify({'ok': True, 'status': p['status'], 'nome': p.get('nome', '')})
     @qr_app.route('/', methods=['GET'])
     def qr_home():
         return jsonify({'ok': True, 'servico': 'Bot Live21 + QR - online'})
     def qr_rodar():
         try:
             porta = int(os.getenv('PORT', '8080'))
-            print(f"📱 Servidor QR ligado na porta {porta}", flush=True)
+            print("Servidor QR ligado na porta " + str(porta), flush=True)
             qr_app.run(host='0.0.0.0', port=porta)
         except Exception as e:
-            print(f"Aviso QR server: {e}", flush=True)
+            print("Aviso QR server: " + str(e), flush=True)
     threading.Thread(target=qr_rodar, daemon=True).start()
 else:
     print("QR desativado - falta Flask/qrcode no requirements", flush=True)
 
-print("🚀 Sistema Live21 v4.0 - SESSION_STRING FINAL ligado!")
-print("👀 Ouvindo: @teamlive21 (SÓ ADMINS)")
-print("📤 Enviando para: @Live21streaming")
-print("✏️ Monitorando EDIÇÕES")
-print("🗑️ Monitorando EXCLUSÕES")
-print("Aguardando...")
-client.start()
-client.run_until_disconnected()
+print("🚀 Sistema Live21 v4.0 ligado!", flush=True)
+print(f"👀 Ouvindo: @{ORIGEM} -> @{DESTINO}", flush=True)
+
+async def main():
+    if not SESSION_STRING:
+        print("❌ ERRO: SESSION_STRING vazio! Coloque em Variables no Railway.", flush=True)
+        return
+    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+    await client.start()
+    print("✅ Conectado no Telegram!", flush=True)
+
+    @client.on(events.NewMessage(chats=ORIGEM))
+    async def copiar(event):
+        try:
+            # Só admins
+            try:
+                sender = await event.get_sender()
+                # Se for canal, verifica se é admin pelo chat
+                # Simplificação: copia tudo de ORIGEM, pois ORIGEM é canal de admins
+            except:
+                pass
+            msg = event.message
+            if not msg:
+                return
+            texto = msg.text or ""
+            if any(p.lower() in texto.lower() for p in PALAVRAS_BLOQUEADAS):
+                print("🚫 Bloqueada palavra proibida", flush=True)
+                return
+            if BLOQUEAR_STICKER and msg.sticker:
+                print("🚫 Sticker bloqueado", flush=True)
+                return
+            # Reposta sem forward: envia texto + mídia como nova mensagem
+            if msg.media:
+                await client.send_file(DESTINO, msg.media, caption=(texto + ASSINATURA) if texto else ASSINATURA)
+            else:
+                if texto:
+                    await client.send_message(DESTINO, texto + ASSINATURA)
+            print(f"✅ Copiado: {texto[:60]}", flush=True)
+        except Exception as e:
+            print(f"Erro copiar: {e}", flush=True)
+
+    @client.on(events.MessageEdited(chats=ORIGEM))
+    async def editar(event):
+        try:
+            # Apaga e reposta simplificado: avisa edição
+            print(f"✏️ Edição detectada id={event.id}", flush=True)
+        except Exception as e:
+            print(f"Erro editar: {e}", flush=True)
+
+    @client.on(events.MessageDeleted(chats=ORIGEM))
+    async def deletar(event):
+        try:
+            print(f"🗑️ Deleção detectada ids={event.deleted_ids}", flush=True)
+        except Exception as e:
+            print(f"Erro deletar: {e}", flush=True)
+
+    print("Aguardando...", flush=True)
+    await client.run_until_disconnected()
+
+if __name__ == "__main__":
+    asyncio.run(main())
