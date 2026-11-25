@@ -14,6 +14,7 @@ from telethon.sessions import StringSession
 API_ID = int(os.getenv('API_ID', '0') or 0)
 API_HASH = os.getenv('API_HASH', '')
 SESSION_STRING = os.getenv('SESSION_STRING', '').strip()
+TELEGRAM_2FA = os.getenv('TELEGRAM_2FA', '').strip()
 PORT = int(os.getenv('PORT', '8080'))
 
 ORIGEM = 'teamlive21'
@@ -51,6 +52,19 @@ def log(*a):
 @app.route('/')
 def home():
     return jsonify({"ok": True, "servico": "Bot Live21 v9 + QR - online"})
+
+@app.route('/senha_2fa', methods=['POST'])
+def senha_2fa():
+    global qr_erro
+    try:
+        d = request.get_json(force=True) or {}
+        senha = (d.get('senha') or d.get('password') or '').strip()
+        if not senha: return jsonify({"ok": False, "erro": "Senha vazia"})
+        # Salva em memoria para a thread do QR usar
+        globals()['TELEGRAM_2FA'] = senha
+        return jsonify({"ok": True, "msg": "Senha 2FA recebida, escaneia o QR de novo"})
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)})
 
 @app.route('/status')
 def status():
@@ -128,6 +142,12 @@ def gerar_qr_background():
         iniciar_copia_com_client(tmp, loop)
     except Exception as e:
         _qr_gerando = False
+        # Se for senha 2FA, mostra status certo pro painel em vez de erro generico
+        if 'password' in str(e).lower() or 'SessionPasswordNeeded' in str(e) or '2FA' in str(e):
+            qr_status = 'precisa_senha_2fa'
+            qr_erro = 'Precisa da senha de 2 etapas do Telegram. Desliga ela ou coloca TELEGRAM_2FA no Railway.'
+            log('Telegram pediu senha de 2 etapas.')
+            return
         qr_erro = str(e)
         qr_status = 'erro'
         log(f'Erro QR: {e}')
