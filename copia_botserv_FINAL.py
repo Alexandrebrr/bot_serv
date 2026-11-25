@@ -169,8 +169,10 @@ def iniciar_copia_com_client(cli, loop):
         except Exception as e:
             log(f'Erro copiar: {e}')
     log(f'Ouvindo: @{ORIGEM} -> @{DESTINO}')
+    # NÃO chama loop.run_until_disconnected() - esse método não existe no loop e derrubava a conexão na hora
+    # Mantém a thread viva com run_forever, o handler de NewMessage fica escutando
     try:
-        loop.run_until_disconnected()
+        loop.run_forever()
     except Exception as e:
         log(f'Client desconectado: {e}')
 
