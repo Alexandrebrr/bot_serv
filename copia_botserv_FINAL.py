@@ -17,8 +17,31 @@ SESSION_STRING = os.getenv('SESSION_STRING', '').strip()
 TELEGRAM_2FA = os.getenv('TELEGRAM_2FA', '').strip()
 PORT = int(os.getenv('PORT', '8080'))
 
-ORIGEM = 'teamlive21'
-DESTINO = 'Live21streaming'
+# PARES 1-para-1: Origem 1 -> Destino 1, Origem 2 -> Destino 2 ... Origem 5 -> Destino 5
+# Lido do painel via api.php, não é fixo. Qualquer grupo pode ser origem ou destino.
+PAINEL_API = os.getenv('PAINEL_API', 'https://botserv.pro/api.php?action=get')
+def carregar_pares():
+    # Tenta ler do painel (banco MySQL via api.php). Se falhar, usa o par padrão pra não parar.
+    try:
+        import urllib.request
+        req = urllib.request.Request(PAINEL_API, headers={'User-Agent': 'BotServ/1.0'})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode())
+            dados = json.loads(d.get('dados', '{}')) if isinstance(d.get('dados'), str) else d.get('dados', {})
+            origens = dados.get('admin_origens') or ['teamlive21','','','','']
+            destinos = dados.get('admin_destinos') or ['Live21streaming','','','','']
+            pares = []
+            for i in range(5):
+                o = (origens[i] or '').strip().lstrip('@').strip()
+                dst = (destinos[i] or '').strip().lstrip('@').strip()
+                if o and dst:
+                    pares.append((o, dst))
+            if pares:
+                log(f'Pares do painel: {pares}')
+                return pares
+    except Exception as e:
+        log(f'Não consegui ler pares do painel, usando padrão: {e}')
+    return [('teamlive21', 'Live21streaming')]
 
 app = Flask(__name__)
 
@@ -156,21 +179,24 @@ def iniciar_copia_com_client(cli, loop):
     global client, client_loop
     client = cli
     client_loop = loop
-    @cli.on(events.NewMessage(chats=ORIGEM))
-    async def copiar(event):
-        try:
-            msg = event.message
-            texto = msg.text or ''
-            if msg.media:
-                await cli.send_file(DESTINO, msg.media, caption=texto)
-            else:
-                await cli.send_message(DESTINO, texto)
-            log(f'Copiado: {texto[:60]}')
-        except Exception as e:
-            log(f'Erro copiar: {e}')
-    log(f'Ouvindo: @{ORIGEM} -> @{DESTINO}')
-    # NÃO chama loop.run_until_disconnected() - esse método não existe no loop e derrubava a conexão na hora
-    # Mantém a thread viva com run_forever, o handler de NewMessage fica escutando
+    pares = carregar_pares()
+    for origem, destino in pares:
+        # Cada par é independente: Origem 1 -> Destino 1, Origem 2 -> Destino 2, ...
+        def fazer_handler(o=origem, d=destino):
+            async def copiar(event):
+                try:
+                    msg = event.message
+                    texto = msg.text or ''
+                    if msg.media:
+                        await cli.send_file(d, msg.media, caption=texto)
+                    else:
+                        await cli.send_message(d, texto)
+                    log(f'Copiado: @{o} -> @{d} : {texto[:60]}')
+                except Exception as e:
+                    log(f'Erro copiar @{o} -> @{d}: {e}')
+            return copiar
+        cli.add_event_handler(fazer_handler(), events.NewMessage(chats=origem))
+        log(f'Ouvindo par: @{origem} -> @{destino}')
     try:
         loop.run_forever()
     except Exception as e:
