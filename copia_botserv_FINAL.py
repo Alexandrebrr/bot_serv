@@ -1,15 +1,19 @@
-# BOTSERVER FINAL - QR de verdade + copia ADM
+# BOTSERVER FINAL - QR de verdade + copia ADM - CORRIGIDO v9
 # Arquivo unico: copia_botserv_FINAL.py
 # Rotas: /  /status  /qr  /gerar_qr
 # Copia: teamlive21 -> Live21streaming (conta logada via SESSION_STRING ou QR)
-import os, io, json, threading, asyncio, base64
+# CORRECOES v9:
+# 1) SEM input() - no Railway nao tem teclado, por isso dava EOF when reading a line
+# 2) QR unico - trava pra nao gerar QR novo a cada /qr, por isso dava AUTH_TOKEN_EXPIRED
+# 3) SESSION_STRING sem cli.start() - start() pede telefone no terminal, agora usa connect() sem pedir nada
+import os, io, json, threading, asyncio, base64, time
 from flask import Flask, jsonify, send_file, request
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
 API_ID = int(os.getenv('API_ID', '0') or 0)
 API_HASH = os.getenv('API_HASH', '')
-SESSION_STRING = os.getenv('SESSION_STRING', '')
+SESSION_STRING = os.getenv('SESSION_STRING', '').strip()
 PORT = int(os.getenv('PORT', '8080'))
 
 ORIGEM = 'teamlive21'
@@ -17,7 +21,6 @@ DESTINO = 'Live21streaming'
 
 app = Flask(__name__)
 
-# --- CORS: sem isso o navegador bloqueia com "Failed to fetch" ---
 @app.after_request
 def _cors(resp):
     resp.headers['Access-Control-Allow-Origin'] = '*'
@@ -38,14 +41,16 @@ qr_erro = ''
 client = None
 client_loop = None
 me_name = ''
+_qr_lock = threading.Lock()
+_qr_gerando = False
+_qr_criado_em = 0
 
 def log(*a):
     print(*a, flush=True)
 
-# ---------- SERVIDOR HTTP ----------
 @app.route('/')
 def home():
-    return jsonify({"ok": True, "servico": "Bot Live21 v8 + QR - online"})
+    return jsonify({"ok": True, "servico": "Bot Live21 v9 + QR - online"})
 
 @app.route('/status')
 def status():
@@ -57,15 +62,25 @@ def status():
 @app.route('/qrcode')
 @app.route('/login_qr')
 def gerar_qr():
-    global qr_img_bytes, qr_status, qr_erro
+    global qr_img_bytes, qr_status, qr_erro, _qr_gerando, _qr_criado_em
     if qr_status == 'conectado':
         return jsonify({"ok": True, "conectado": True, "usuario": me_name, "msg": "Ja conectado, nao precisa de QR"})
-    if qr_img_bytes:
+    # Se ja tem QR pronto e tem menos de 50s, devolve o MESMO QR - nao gera outro e nao invalida
+    if qr_img_bytes and qr_status == 'qr_pronto' and (time.time() - _qr_criado_em) < 50:
         return send_file(io.BytesIO(qr_img_bytes), mimetype='image/png')
-    # tenta gerar um QR novo em background
-    threading.Thread(target=gerar_qr_background, daemon=True).start()
+    # Se QR expirou, limpa e gera novo
+    if qr_img_bytes and (time.time() - _qr_criado_em) >= 50:
+        qr_img_bytes = None
+        qr_status = 'aguardando'
+    # Trava: so 1 geracao por vez
+    with _qr_lock:
+        if _qr_gerando:
+            # ja esta gerando, espera
+            pass
+        else:
+            _qr_gerando = True
+            threading.Thread(target=gerar_qr_background, daemon=True).start()
     # espera ate 8s pelo QR
-    import time
     for _ in range(16):
         time.sleep(0.5)
         if qr_img_bytes:
@@ -73,50 +88,54 @@ def gerar_qr():
     return jsonify({"ok": False, "erro": qr_erro or "QR ainda gerando, clica de novo em Gerar QR Code"})
 
 def gerar_qr_background():
-    global qr_img_bytes, qr_status, qr_erro, client, me_name
+    global qr_img_bytes, qr_status, qr_erro, client, me_name, _qr_gerando, _qr_criado_em
     try:
         import qrcode
-        # client temporario so para QR
         tmp = TelegramClient(StringSession(), API_ID, API_HASH)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(tmp.connect())
         qr_login = loop.run_until_complete(tmp.qr_login())
-        # gera imagem do QR a partir do token
         token = qr_login.token
-        # Telethon: o QR e o token em bytes -> url tg://login?token=...
-        # O Telegram espera o QR com o token codificado
-        import base64 as _b
-        url = 'tg://login?token=' + _b.urlsafe_b64encode(token).decode()
+        url = 'tg://login?token=' + base64.urlsafe_b64encode(token).decode()
         img = qrcode.make(url)
         buf = io.BytesIO()
         img.save(buf, format='PNG')
         qr_img_bytes = buf.getvalue()
+        _qr_criado_em = time.time()
         qr_status = 'qr_pronto'
-        log('📱 QR gerado, aguardando escaneio...')
-        # espera o usuario escanear (ate 3 min)
-        loop.run_until_complete(qr_login.wait(180))
-        # conectado!
+        _qr_gerando = False
+        log('QR gerado, aguardando escaneio... (vale 50s, nao aperte Gerar de novo enquanto tenta escanear)')
+        # espera o usuario escanear (ate 50s - mesmo tempo do painel)
+        try:
+            loop.run_until_complete(qr_login.wait(50))
+        except Exception as e:
+            # Timeout = QR expirou porque ninguem escaneou a tempo
+            log('QR venceu sem escaneio, gere outro. Detalhe: ' + str(e))
+            qr_img_bytes = None
+            qr_status = 'aguardando'
+            qr_erro = 'QR venceu, clica em Atualizar QR'
+            try: loop.run_until_complete(tmp.disconnect())
+            except Exception: pass
+            return
         me = loop.run_until_complete(tmp.get_me())
         me_name = me.first_name or ''
         qr_status = 'conectado'
         qr_img_bytes = None
-        log(f'✅ QR conectado como: {me_name}')
-        # salva a sessao para o Railway nao perder na proxima vez (mostra no log)
+        log(f'QR conectado como: {me_name}')
         sess = tmp.session.save()
-        log('SESSION_STRING_NOVA=' + sess[:20] + '... (copia do log completo se precisar)')
-        # agora liga a copia com esse client
+        log('SESSION_STRING_NOVA gerada - copia do log e cola no Railway como SESSION_STRING pra nao precisar de QR de novo. Comeco: ' + sess[:20] + '...')
         iniciar_copia_com_client(tmp, loop)
     except Exception as e:
+        _qr_gerando = False
         qr_erro = str(e)
         qr_status = 'erro'
-        log(f'❌ Erro QR: {e}')
+        log(f'Erro QR: {e}')
 
 def iniciar_copia_com_client(cli, loop):
     global client, client_loop
     client = cli
     client_loop = loop
-    # registra handler de copia
     @cli.on(events.NewMessage(chats=ORIGEM))
     async def copiar(event):
         try:
@@ -126,10 +145,10 @@ def iniciar_copia_com_client(cli, loop):
                 await cli.send_file(DESTINO, msg.media, caption=texto)
             else:
                 await cli.send_message(DESTINO, texto)
-            log(f'✅ Copiado: {texto[:60]}')
+            log(f'Copiado: {texto[:60]}')
         except Exception as e:
-            log(f'❌ Erro copiar: {e}')
-    log(f'👀 Ouvindo: @{ORIGEM} -> @{DESTINO}')
+            log(f'Erro copiar: {e}')
+    log(f'Ouvindo: @{ORIGEM} -> @{DESTINO}')
     try:
         loop.run_until_disconnected()
     except Exception as e:
@@ -138,26 +157,31 @@ def iniciar_copia_com_client(cli, loop):
 def iniciar_com_session_string():
     global client, qr_status, me_name
     try:
+        # NUNCA usa cli.start() aqui - start() pede telefone no terminal e no Railway da EOF
         cli = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(cli.start())
+        loop.run_until_complete(cli.connect())
+        # Se SESSION_STRING for invalida, is_user_authorized() = False, cai pro QR sem pedir telefone
+        autorizado = loop.run_until_complete(cli.is_user_authorized())
+        if not autorizado:
+            raise Exception('SESSION_STRING invalida ou expirada')
         me = loop.run_until_complete(cli.get_me())
         me_name = me.first_name or ''
         qr_status = 'conectado'
-        log(f'✅ Conectado via SESSION_STRING como: {me_name}')
-        log(f'👀 Ouvindo: @{ORIGEM} -> @{DESTINO}')
-        # Roda o loop DENTRO desta mesma thread - nao pode trocar de thread senao da erro de Future/awaitable
+        log(f'Conectado via SESSION_STRING como: {me_name}')
+        log(f'Ouvindo: @{ORIGEM} -> @{DESTINO}')
         iniciar_copia_com_client(cli, loop)
     except Exception as e:
-        log(f'⚠️ SESSION_STRING falhou, vai usar QR: {e}')
+        # SEM input(), SEM pedir telefone - so vai pro QR
+        log(f'SESSION_STRING falhou, vai usar QR: {e}')
         qr_status = 'aguardando'
 
 if __name__ == '__main__':
-    log('📱 Servidor QR v8 ligado na porta', PORT)
-    log('🚀 Sistema Live21 v8 + QR ligado!')
+    log('Servidor QR v9 ligado na porta', PORT)
+    log('Sistema Live21 v9 + QR ligado!')
     if SESSION_STRING and API_ID:
         threading.Thread(target=iniciar_com_session_string, daemon=True).start()
     else:
-        log('⏳ Sem SESSION_STRING, aguardando QR pelo painel...')
+        log('Sem SESSION_STRING, aguardando QR pelo painel...')
     app.run(host='0.0.0.0', port=PORT, threaded=True)
