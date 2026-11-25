@@ -159,9 +159,9 @@ def gerar_qr_background():
         me_name = me.first_name or ''
         qr_status = 'conectado'
         qr_img_bytes = None
-        log(f'QR conectado como: {me_name}')
+        log(f'SESSION_STRING_NOVA_COMPLETA: {cli.session.save()}')
+    log(f'QR conectado como: {me_name}')
         sess = tmp.session.save()
-        log('SESSION_STRING_NOVA gerada - copia do log e cola no Railway como SESSION_STRING pra nao precisar de QR de novo. Comeco: ' + sess[:20] + '...')
         iniciar_copia_com_client(tmp, loop)
     except Exception as e:
         _qr_gerando = False
