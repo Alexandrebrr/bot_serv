@@ -186,17 +186,27 @@ async def _flush_album(chave, cli, destino, origem):
         # Baixa todas as mídias do álbum
         arquivos = []
         legenda = ''
-        for m in msgs:
+        for idx, m in enumerate(msgs):
             if m.text and not legenda:
                 legenda = m.text
             if m.media:
-                bio = await cli.download_media(m.media, file=bytes)
-                if bio:
-                    import io as _io
-                    arquivos.append(_io.BytesIO(bio))
+                # Baixa mantendo o nome e a extensão, senão o Telegram manda como 'unnamed' arquivo
+                try:
+                    nome = getattr(getattr(m, 'file', None), 'name', None) or f'banner_{idx+1}.jpg'
+                    if '.' not in nome:
+                        nome += '.jpg'
+                except Exception:
+                    nome = f'banner_{idx+1}.jpg'
+                import io as _io
+                buf = _io.BytesIO()
+                buf.name = nome
+                await cli.download_media(m.media, file=buf)
+                buf.seek(0)
+                # Força como foto quando for jpg/png, não como documento
+                arquivos.append(buf)
         if arquivos:
             # Manda como 1 álbum só, independente da quantidade (2, 9, 15...)
-            enviados = await cli.send_file(destino, arquivos, caption=legenda)
+            enviados = await cli.send_file(destino, arquivos, caption=legenda, force_document=False)
             try:
                 lista = enviados if isinstance(enviados, list) else [enviados]
                 for idx, ev in enumerate(lista):
