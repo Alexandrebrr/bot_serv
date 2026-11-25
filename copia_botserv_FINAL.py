@@ -173,6 +173,42 @@ def gerar_qr_background():
         qr_status = 'erro'
         log(f'Erro QR: {e}')
 
+# Buffer pra álbum: mensagens com o mesmo grouped_id chegam juntas, espera 1.5s e manda como 1 álbum só
+import asyncio as _asyncio, time as _time
+mapa_msg = {}  # (origem, destino, id_origem) -> id_destino, pra apagar no destino quando apagar na origem
+album_buffer = {}  # (destino, grouped_id) -> {msgs:[], timer, origem}
+async def _flush_album(chave, cli, destino, origem):
+    await _asyncio.sleep(1.5)
+    item = album_buffer.pop(chave, None)
+    if not item: return
+    msgs = item['msgs']
+    try:
+        # Baixa todas as mídias do álbum
+        arquivos = []
+        legenda = ''
+        for m in msgs:
+            if m.text and not legenda:
+                legenda = m.text
+            if m.media:
+                bio = await cli.download_media(m.media, file=bytes)
+                if bio:
+                    import io as _io
+                    arquivos.append(_io.BytesIO(bio))
+        if arquivos:
+            # Manda como 1 álbum só, independente da quantidade (2, 9, 15...)
+            enviados = await cli.send_file(destino, arquivos, caption=legenda)
+            try:
+                lista = enviados if isinstance(enviados, list) else [enviados]
+                for idx, ev in enumerate(lista):
+                    if idx < len(msgs):
+                        mapa_msg[(origem, destino, msgs[idx].id)] = ev.id
+            except Exception: pass
+            log(f'Copiado álbum: @{origem} -> @{destino} : {len(arquivos)} banners agrupados')
+        elif legenda:
+            await cli.send_message(destino, legenda)
+    except Exception as e:
+        log(f'Erro copiar álbum @{origem} -> @{destino}: {e}')
+
 def iniciar_copia_com_client(cli, loop):
     global client, client_loop
     client = cli
@@ -183,16 +219,46 @@ def iniciar_copia_com_client(cli, loop):
             async def copiar(event):
                 try:
                     msg = event.message
+                    gid = getattr(msg, 'grouped_id', None)
+                    # Se for álbum (vários banners juntos), junta e manda agrupado
+                    if gid:
+                        chave = (d, str(gid))
+                        if chave not in album_buffer:
+                            album_buffer[chave] = {'msgs': [], 'origem': o}
+                            # Agenda o envio do álbum completo
+                            loop.create_task(_flush_album(chave, cli, d, o))
+                        album_buffer[chave]['msgs'].append(msg)
+                        return
+                    # Mensagem solta, copia normal
                     texto = msg.text or ''
                     if msg.media:
-                        await cli.send_file(d, msg.media, caption=texto)
+                        enviado = await cli.send_file(d, msg.media, caption=texto)
                     else:
-                        await cli.send_message(d, texto)
+                        enviado = await cli.send_message(d, texto)
+                    # Salva o par pra apagar junto depois
+                    try:
+                        ids_enviados = enviado if isinstance(enviado, list) else [enviado]
+                        for ev in ids_enviados:
+                            mapa_msg[(o, d, msg.id)] = ev.id
+                    except Exception: pass
                     log(f'Copiado: @{o} -> @{d} : {texto[:60]}')
                 except Exception as e:
                     log(f'Erro copiar @{o} -> @{d}: {e}')
             return copiar
         cli.add_event_handler(fazer_handler(), events.NewMessage(chats=origem))
+        # Apagar na origem -> apaga no destino automaticamente
+        def fazer_apagar(o=origem, d=destino):
+            async def apagar(event):
+                try:
+                    for mid in event.deleted_ids:
+                        did = mapa_msg.pop((o, d, mid), None)
+                        if did:
+                            await cli.delete_messages(d, did)
+                            log(f'Apagado no destino: @{o} -> @{d} : msg {mid}')
+                except Exception as e:
+                    log(f'Erro apagar @{o} -> @{d}: {e}')
+            return apagar
+        cli.add_event_handler(fazer_apagar(), events.MessageDeleted(chats=origem))
         log(f'Ouvindo par: @{origem} -> @{destino}')
     try:
         loop.run_forever()
