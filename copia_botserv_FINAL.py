@@ -32,24 +32,6 @@ def carregar_pares():
                 o=(origens[i] or '').strip().lstrip('@').strip()
                 dst=(destinos[i] or '').strip().lstrip('@').strip()
                 if o and dst: pares.append((o,dst))
-            # Clientes: cada cliente também tem Origem 1->Destino 1, Origem 2->Destino 2, etc.
-            # Só conta quem está Ativo ou em Teste. Pausado / Bloqueado não copia.
-            for c in (dados.get('clientes') or []):
-                status = (c.get('status') or '').strip()
-                if status not in ('Ativo', 'Teste'):
-                    continue
-                co = c.get('origens') or []
-                cd = c.get('destinos') or []
-                # Limite por plano: Teste só 1 par, Básico só 1 par, Pro 3 pares, Premium 5 pares
-                plano = (c.get('plano') or '').strip()
-                max_par = 1 if status == 'Teste' else (1 if plano == 'Básico' else (3 if plano == 'Pro' else 5))
-                for i in range(min(max_par, 5)):
-                    o = (co[i] if i < len(co) else '') or ''
-                    dst = (cd[i] if i < len(cd) else '') or ''
-                    o = o.strip().lstrip('@').strip()
-                    dst = dst.strip().lstrip('@').strip()
-                    if o and dst:
-                        pares.append((o, dst))
             if pares:
                 log(f'Pares do painel: {pares}')
                 return pares
