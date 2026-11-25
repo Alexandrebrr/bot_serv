@@ -17,11 +17,8 @@ SESSION_STRING = os.getenv('SESSION_STRING', '').strip()
 TELEGRAM_2FA = os.getenv('TELEGRAM_2FA', '').strip()
 PORT = int(os.getenv('PORT', '8080'))
 
-# PARES 1-para-1: Origem 1 -> Destino 1, Origem 2 -> Destino 2 ... Origem 5 -> Destino 5
-# Lido do painel via api.php, não é fixo. Qualquer grupo pode ser origem ou destino.
 PAINEL_API = os.getenv('PAINEL_API', 'https://botserv.pro/api.php?action=get')
 def carregar_pares():
-    # Tenta ler do painel (banco MySQL via api.php). Se falhar, usa o par padrão pra não parar.
     try:
         import urllib.request
         req = urllib.request.Request(PAINEL_API, headers={'User-Agent': 'BotServ/1.0'})
@@ -30,18 +27,19 @@ def carregar_pares():
             dados = json.loads(d.get('dados', '{}')) if isinstance(d.get('dados'), str) else d.get('dados', {})
             origens = dados.get('admin_origens') or ['teamlive21','','','','']
             destinos = dados.get('admin_destinos') or ['Live21streaming','','','','']
-            pares = []
+            pares=[]
             for i in range(5):
-                o = (origens[i] or '').strip().lstrip('@').strip()
-                dst = (destinos[i] or '').strip().lstrip('@').strip()
-                if o and dst:
-                    pares.append((o, dst))
+                o=(origens[i] or '').strip().lstrip('@').strip()
+                dst=(destinos[i] or '').strip().lstrip('@').strip()
+                if o and dst: pares.append((o,dst))
             if pares:
                 log(f'Pares do painel: {pares}')
                 return pares
     except Exception as e:
-        log(f'Não consegui ler pares do painel, usando padrão: {e}')
-    return [('teamlive21', 'Live21streaming')]
+        log(f'Nao consegui ler pares do painel, usando padrao: {e}')
+    return [('teamlive21','Live21streaming')]
+ORIGEM = 'teamlive21'
+DESTINO = 'Live21streaming'
 
 app = Flask(__name__)
 
@@ -159,9 +157,9 @@ def gerar_qr_background():
         me_name = me.first_name or ''
         qr_status = 'conectado'
         qr_img_bytes = None
-        log(f'SESSION_STRING_NOVA_COMPLETA: {cli.session.save()}')
-    log(f'QR conectado como: {me_name}')
+        log(f'QR conectado como: {me_name}')
         sess = tmp.session.save()
+        log(f'SESSION_STRING_NOVA_COMPLETA: {sess}')
         iniciar_copia_com_client(tmp, loop)
     except Exception as e:
         _qr_gerando = False
@@ -181,7 +179,6 @@ def iniciar_copia_com_client(cli, loop):
     client_loop = loop
     pares = carregar_pares()
     for origem, destino in pares:
-        # Cada par é independente: Origem 1 -> Destino 1, Origem 2 -> Destino 2, ...
         def fazer_handler(o=origem, d=destino):
             async def copiar(event):
                 try:
